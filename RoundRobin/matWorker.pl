@@ -13,7 +13,6 @@ use POSIX;
 
 our $workerID = $PID;
 our $context = zmq_init();
-our $log = "/home/blhall/projects/MAT/$workerID.log";
 our $alive = 1;
 
 # Socket to talk back to server.
@@ -27,9 +26,7 @@ zmq_connect($receiver, 'tcp://localhost:5557');
 #Send message letting server know we are waiting for a job
 zmq_send($sender, "Worker $workerID online");
 
-printLog("Online.");
 main();
-print "Exited main loop\n";
 
 sub main {
   while($alive) {
@@ -47,17 +44,7 @@ sub main {
 sub done {
   zmq_close($receiver); # Stop accepting new jobs.
   zmq_close($sender); # Stop talking to server.
-  print "Worker: $workerID : Closed.\n";
   exit(0);
-}
-
-sub printLog {
-  my ($msg) = @_;
-#  if (open LOG,">>$log") {
-#    print LOG getTimestamp() . " Worker $workerID: $msg\n";
-#    close LOG;
-#  print "$msg\n";
-#  }
 }
 
 sub processCommand {
@@ -81,6 +68,11 @@ sub processCommand {
   }
 }
 
+sub printLog {
+  my ($msg) = @_;
+  zmq_send($sender, "Worker Log: $msg");
+}
+
 sub processFileNo {
   my ($fileNo) = @_;
   printLog("Marking file $fileNo as transmitted.");
@@ -98,16 +90,4 @@ sub processFileNo {
     printLog("File $fileNo marked.");
     zmq_send($sender, "Worker $workerID Ready");
   }
-}
-
-sub getTimestamp {
-  return POSIX::strftime("%m/%d/%Y %H:%M:%S :", localtime);
-}
-
-sub getdate {
-  return POSIX::strftime("%Y%m%d", localtime);
-}
-
-END {
-  exit(0);
 }

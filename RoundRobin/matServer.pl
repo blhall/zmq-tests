@@ -20,6 +20,7 @@ our $connected_workers = 0;
 our @workQ = ();
 our @errors = ();
 our $recoveryFile = "/home/blhall/projects/MAT/recovery.list";
+our $logdir = "/home/blhall/projects/MAT";
 our %children = ();
 our $debug = 0;
 our $cleanExit = 0;
@@ -235,8 +236,25 @@ sub workerMessage {
     my $file = $2;
     $children{$pid} = "Online/Ready";
   }
+  elsif ($msg =~ /Worker Log: (.+)/) {
+    printLog($1);
+  }
   else {
     print "Unknown worker message $msg\n";
+  }
+}
+
+sub printLog {
+  my ($msg) = @_;
+  my $date = POSIX::strftime("%Y%m%d", localtime);
+  my $log = "$logdir/$date.log";
+
+  if (open LOG,">>$log") {
+    print LOG getTimestamp() . " $msg\n";
+    close LOG;
+  }
+  else {
+    print "Failed to open $log for writing.\n";
   }
 }
 
@@ -369,7 +387,7 @@ sub endServer {
   print "\n";
   my $previous = 0;
   while ($workers > 0) {
-    print "\rThere are still $workers workers.." if $previous ne $workers;
+    print "There are still $workers workers..\n" if $previous ne $workers;
     $previous = $workers;
     my $message = zmq_recv($workerTalkBack, ZMQ_NOBLOCK) || undef;
     my $workerMsg = zmq_msg_data($message) if $message;
@@ -390,7 +408,9 @@ sub getWorkers {
   my $workers = keys %children;
   return $workers;
 }
-
+sub getTimestamp {
+  return POSIX::strftime("%m/%d/%Y %H:%M:%S :", localtime);
+}
 END {
   if(!$cleanExit) {
     endServer();
