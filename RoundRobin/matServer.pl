@@ -13,6 +13,7 @@ use English;
 use ZMQ::LibZMQ2;
 use ZMQ::Constants qw (ZMQ_PUSH ZMQ_PULL ZMQ_NOBLOCK ZMQ_RCVMORE ZMQ_POLLIN);
 use IO::Select;
+use POSIX;
 
 our $worker_count = 4;
 our $connected_workers = 0;
@@ -21,13 +22,25 @@ our @errors = ();
 our $recoveryFile = "/home/blhall/projects/MAT/recovery.list";
 our %children = ();
 our $debug = 0;
-$SIG{'CHLD'} = "IGNORE";#"IGNORE"; #Let the system just reap children.
+our $cleanExit = 0;
+our $work = 1;
 
-sub reaper_2 
-{
-  print "Reaper working\n";
-  wait;
+$SIG{'CHLD'} = "reaper";#"IGNORE"; #Let the system just reap children.
+sub reaper {
+  my $pid;
+  $pid = waitpid(-1, &WNOHANG);
+
+  if ($pid == -1) {
+    # no child waiting.  Ignore it.
+  } elsif (WIFEXITED($?)) {
+    print "REAPER: Process $pid exited.\n";
+    delete $children{$pid};
+  } else {
+    print "REAPER: False alarm on $pid.\n";
+  }
+  $SIG{'CHLD'} = "reaper";          # in case of unreliable signals
 }
+
 print "Starting Mark As Transmit Job Queue server.\n";
 
 my $context = zmq_init();
@@ -90,19 +103,19 @@ sub main {
     },
   );
 
-
   my $s = IO::Select->new();
   $s->add(\*STDIN);
 
 printStatus();
 printChildren();
+
 while($alive) {
   if ($s->can_read(.5)) {
     chomp(my $in = <STDIN>);
     checkInput($in);
   }
 
-  if(@workQ > 0 && workerReady()) {
+  if(@workQ > 0 && workerReady() && $work) {
     zmq_send($sender, shift(@workQ));
   }
   zmq_poll(\@poll);
@@ -135,10 +148,10 @@ sub checkInput {
     my $number = $2 || 1;
     killWorker($number);
   }
-  elsif($in =~ /^(h|help|\?)/i) {
+  elsif($in =~ /^(h|help|\?)$/i) {
     printHelp();
   }
-  elsif($in =~ /^mark (\d+)/) {
+  elsif($in =~ /^mark (\d+)$/) {
     push(@workQ, $1);
     print "Added $1 to work queue\n";
   }
@@ -147,6 +160,14 @@ sub checkInput {
   }
   elsif($in =~ /^clear error/i) {
     clearErrors();
+  }
+  elsif($in =~ /^hold$/i) {
+    print "WARNING! Holding all jobs until told otherwise.\n";
+    $work = 0;
+  }
+  elsif($in =~ /^unhold$/i) {
+    print "Unholding jobs.\n";
+    $work = 1;
   }
   else {
     print "Unknown command '$in'\n";
@@ -164,12 +185,15 @@ sub printHelp {
   print "'list'                Lists PID's of parent and children.\n";
   print "'print/show errors'   Lists current known problem files.\n";
   print "'clear errors'        Clears current known problem files.\n";
+  print "'hold' or 'unhold'    Holds current work, will not hand out jobs\n";
   print "'help/?'              Prints this message.\n";
 }
 
 sub printStatus {
   my $q = @workQ;
-  print "Current workers: $connected_workers; $q jobs in queue.\n";
+  my $workers = getWorkers();
+  print "Current workers: $workers; $q jobs in queue.\n";
+  print "!!!!  WARNING: ALL JOBS CURRENTLY ON HOLD  !!!!!\ntype 'unhold' to unhold workers.\n" if !$work;
 }
 
 sub printChildren {
@@ -187,14 +211,10 @@ sub workerMessage {
     my $id = $1;
     my $status = $2;
     if ($status eq 'offline') {
-      $connected_workers -= 1;
-      print "Reduced connected workers.\n" if $debug;
       $children{$id} = 'Retired';
     }
     elsif ($status eq 'online') {
-      $connected_workers += 1;
       $children{$id} = 'Online/Ready';
-      print "Increased connected workers.\n" if $debug;
     }
   }
   elsif ($msg =~ /Worker (\d+) working on (\d+)/i) {
@@ -218,22 +238,6 @@ sub workerMessage {
   else {
     print "Unknown worker message $msg\n";
   }
-}
-sub reaper {
-  my $pid;
-  print "Reaper active\n";
-
-  $pid = waitpid(-1, &WNOHANG);
-
-  if ($pid == -1) {
-    # no child waiting.  Ignore it.
-  } elsif (WIFEXITED($?)) {
-    print "Process $pid exited.\n";
-    $children{$pid} = 'Closed Cleanly';
-  } else {
-    print "False alarm on $pid.\n";
-  }
-  $SIG{'CHLD'} = "reaper";          # in case of unreliable signals
 }
 
 sub spawnWorkers {
@@ -321,21 +325,47 @@ sub clearErrors {
 }
 
 sub workerCleanup {
+  zmq_close($workerTalkBack); # Stop listening to workers.
+  zmq_close($sender); # Stop talking to workers.
+  sleep(5); # Give the workers a few seconds to announce they have closed.
+}
 
+sub requestCleanup {
+  # Here I want to loop until I have no requests waiting and then stop listening for new requests.
+  # This will minimize the amount of lost requests if a server needs to be shut down.
+  my $cnt = 0;
+  while(1) {
+    # Request Logic
+    my $message = zmq_recv($requests, ZMQ_NOBLOCK) || undef;
+    my $jobMsg = zmq_msg_data($message) if $message;
+    last unless $message;
+
+    if (defined $jobMsg && $jobMsg =~ /^(\d+)/) {
+      my $fileno = $1;
+      push(@workQ, $fileno);
+      $cnt += 1;
+    }
+    else {
+      print "\nUnrecognized $jobMsg\n";
+    }    
+  }
+  print "There were $cnt waiting requests. Closing connection now.\n";
+  zmq_close($requests); # Stop taking requests
 }
 
 sub endServer {
+  # First cleanup rquests and then stop taking any more.
+  print "Getting any waiting requests.\n";
+  requestCleanup();
+
   if (@workQ > 0) {
     print "Files still in Queue! Attempting to save them to $recoveryFile.\n";
     saveQueue();
   }
   print "Waiting for workers to finish...\n";
-  my $workers = 0;
-  foreach my $id (sort keys %children) {
-    $workers += 1 if $children{$id} ne 'Retired';
-  }
+  my $workers = getWorkers();
 
-  killWorker($workers);
+  killWorker($workers); #Send a die message for each connected worker.
   print "\n";
   my $previous = 0;
   while ($workers > 0) {
@@ -345,20 +375,24 @@ sub endServer {
     my $workerMsg = zmq_msg_data($message) if $message;
 
     if (defined $workerMsg) {
-      #print "Worker message $workerMsg\n" if $debug;
       workerMessage($workerMsg);
     }
-    $workers = 0;
-    foreach my $id (sort keys %children) {
-      $workers += 1 if $children{$id} ne 'Retired';
-    }
+    $workers = getWorkers();
   }
-  print "\nServer is safe to kill.\n";
   print "Cleaning up workers...\n";
   workerCleanup();
+  $cleanExit = 1;
+  print "\nServer Cleanly closed.\n";
   exit();
 }
 
+sub getWorkers {
+  my $workers = keys %children;
+  return $workers;
+}
+
 END {
-#  endServer();
+  if(!$cleanExit) {
+    endServer();
+  }
 }

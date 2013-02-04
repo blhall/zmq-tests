@@ -30,7 +30,6 @@ zmq_send($sender, "Worker $workerID online");
 printLog("Online.");
 main();
 print "Exited main loop\n";
-exit(0);
 
 sub main {
   while($alive) {
@@ -46,6 +45,9 @@ sub main {
 }
 
 sub done {
+  zmq_close($receiver); # Stop accepting new jobs.
+  zmq_close($sender); # Stop talking to server.
+  print "Worker: $workerID : Closed.\n";
   exit(0);
 }
 
@@ -85,7 +87,8 @@ sub processFileNo {
   zmq_send($sender, "Worker $workerID working on $fileNo");
   eval {
     #Run mark job here
-    sleep(30); #Pretend to do work as usual.
+    my $rand = rand(45) + 1; 
+    sleep($rand); #Pretend to do work as usual.
   };
   if ($@) {
     printLog("Had error marking file $fileNo $@");
